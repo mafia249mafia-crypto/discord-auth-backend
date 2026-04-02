@@ -130,7 +130,7 @@ def logout():
     session.pop("user_discord_id", None)
     session.pop("username", None)
     session.pop("oauth_state", None)
-    return redirect("http://127.0.0.1:5500/index.html") # Redirect to frontend's home page
+    return redirect("https://mb7ontop.netlify.app/index.html") # Redirect to frontend's home page
 
 if __name__ == "__main__":
     # In a production environment, use a more robust WSGI server like Gunicorn or uWSGI
