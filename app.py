@@ -14,11 +14,11 @@ app.permanent_session_lifetime = timedelta(minutes=60) # Session active for 60 m
 # --- Discord OAuth2 Configuration ---
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID")
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "http://127.0.0.1:5000/callback")
+DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "https://my-discord-auth.onrender.com/callback")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 # Make sure this REDIRECT_URI matches the one you set in your Discord application settings
 # It should point to the /callback endpoint of your Flask app
-DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "http://127.0.0.1:5000/callback")
+DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "https://my-discord-auth.onrender.com/callback")
 
 # Comma-separated string of Discord User IDs allowed to access the military police page
 # Example: "123456789012345678,987654321098765432"
