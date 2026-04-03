@@ -53,9 +53,16 @@ def init_db():
 # Initialize the database
 init_db()
 
-# ALlowed Discord User IDs are now managed in the database
-# ALLOWED_DISCORD_USER_IDS_STR = os.getenv("ALLOWED_DISCORD_USER_IDS")
-# ALLOWED_DISCORD_USER_IDS = [id.strip() for id in ALLOWED_DISCORD_USER_IDS_STR.split(',')] if ALLOWED_DISCORD_USER_IDS_STR else []
+# --- Allowed Discord User IDs (By Department) ---
+# Hardcoded in the file as requested by the user for easy management
+ALLOWED_DEPARTMENT_MEMBERS = {
+    'SHORTA_ASKARYA': ["1350227902888808625", "1277659394305163310", "1322876094742790185"],
+    'SHOON_EDARYA': ["1350227902888808625", "1277659394305163310", "1322876094742790185"],
+    'KEYADAT_AL_SECTOR': ["1350227902888808625", "1277659394305163310", "1322876094742790185"],
+    'SHOON_TAJNEED': ["1350227902888808625", "1277659394305163310", "1322876094742790185"],
+    'SHOON_DOBAT': ["1350227902888808625", "1277659394305163310", "1322876094742790185"],
+    'SHOON_KEBAR_DOBAT': ["1277659394305163310", "1322876094742790185"]
+}
 
 # Discord API Endpoints
 DISCORD_API_BASE_URL = "https://discord.com/api/v10"
@@ -143,7 +150,7 @@ def callback():
         return redirect(f"{FRONTEND_URL}?verified=false&department_id={department_id}&reason=id_not_allowed")
 
 def is_department_member(discord_id, department_id):
-    # First, check if there's an environment variable for this department
+    # Map department IDs to the legacy ENV names for consistency
     env_var_map = {
         'military-police': 'SHORTA_ASKARYA',
         'admin-affairs': 'SHOON_EDARYA',
@@ -153,15 +160,16 @@ def is_department_member(discord_id, department_id):
         'senior-officer-affairs': 'SHOON_KEBAR_DOBAT'
     }
     
-    env_var_name = env_var_map.get(department_id)
-    if env_var_name:
-        allowed_ids_str = os.getenv(env_var_name)
-        if allowed_ids_str:
-            allowed_ids = [id.strip() for id in allowed_ids_str.split(',')]
-            if discord_id in allowed_ids:
-                return True
+    env_name = env_var_map.get(department_id)
+    if not env_name:
+        return False
 
-    # Second, check the database as a fallback
+    # Check if the user's ID is in the hardcoded list for the specific department
+    allowed_ids = ALLOWED_DEPARTMENT_MEMBERS.get(env_name, [])
+    if discord_id in allowed_ids:
+        return True
+
+    # Fallback to database if needed, though hardcoded list is now preferred
     table_map = {
         'military-police': 'military_police_members',
         'admin-affairs': 'admin_affairs_members',
