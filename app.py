@@ -1,6 +1,7 @@
 import os
 import requests
 import sqlite3
+import datetime
 from flask import Flask, redirect, url_for, session, request, jsonify, g
 from dotenv import load_dotenv
 from datetime import timedelta
@@ -23,6 +24,15 @@ DISCORD_REDIRECT_URI = os.getenv("DISCORD_REDIRECT_URI", "http://127.0.0.1:5000/
 
 # --- Database Configuration ---
 DATABASE = 'database.db'
+
+DEPARTMENT_IDS = {
+    'military-police',
+    'admin-affairs',
+    'sector-command',
+    'recruitment-affairs',
+    'officer-affairs',
+    'senior-officer-affairs'
+}
 
 def get_db():
     db = getattr(g, '_database', None)
@@ -47,11 +57,18 @@ def init_db():
                 db.commit()
             else:
                 app.logger.warning("schema.sql not found. Skipping database initialization.")
+            ensure_core_tables()
     except Exception as e:
         app.logger.error(f"Error initializing database: {e}")
 
-# Initialize the database
-init_db()
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get("Origin", "*")
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+    return response
 
 # --- Allowed Discord User IDs (By Department) ---
 # Hardcoded in the file as requested by the user for easy management
@@ -191,6 +208,215 @@ def is_department_member(discord_id, department_id):
     except Exception as e:
         app.logger.error(f"Database error: {e}")
         return False
+
+def ensure_core_tables():
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS allowed_department_ids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            department_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            user_name TEXT,
+            UNIQUE(department_id, user_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS hwid_locks (
+            user_id TEXT PRIMARY KEY,
+            device_id TEXT NOT NULL,
+            locked_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+    """)
+    cursor.execute("PRAGMA table_info(allowed_department_ids)")
+    existing_columns = {row["name"] for row in cursor.fetchall()}
+    if "user_name" not in existing_columns:
+        cursor.execute("ALTER TABLE allowed_department_ids ADD COLUMN user_name TEXT")
+    db.commit()
+
+init_db()
+
+def normalize_user_id(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value.isdigit():
+        return None
+    return value
+
+def normalize_department_id(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if value not in DEPARTMENT_IDS:
+        return None
+    return value
+
+def normalize_device_id(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or len(value) > 200:
+        return None
+    return value
+
+def normalize_user_name(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    if len(value) > 80:
+        value = value[:80]
+    return value
+
+def is_allowed_in_department_db(user_id, department_id):
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT 1 FROM allowed_department_ids WHERE department_id = ? AND user_id = ?",
+        (department_id, user_id),
+    )
+    return cursor.fetchone() is not None
+
+def check_or_create_hwid_lock(user_id, device_id):
+    now = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT device_id FROM hwid_locks WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            "INSERT INTO hwid_locks (user_id, device_id, locked_at, last_seen_at) VALUES (?, ?, ?, ?)",
+            (user_id, device_id, now, now),
+        )
+        db.commit()
+        return True, "locked"
+    if row["device_id"] != device_id:
+        return False, "mismatch"
+    cursor.execute(
+        "UPDATE hwid_locks SET last_seen_at = ? WHERE user_id = ?",
+        (now, user_id),
+    )
+    db.commit()
+    return True, "ok"
+
+def require_sector_admin(admin_user_id, admin_device_id):
+    if not is_allowed_in_department_db(admin_user_id, "sector-command"):
+        return False, "not_allowed"
+    ok, lock_status = check_or_create_hwid_lock(admin_user_id, admin_device_id)
+    if not ok:
+        return False, "hwid_mismatch"
+    return True, lock_status
+
+@app.route("/api/verify", methods=["POST", "OPTIONS"])
+def api_verify():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    department_id = normalize_department_id(payload.get("department_id"))
+    user_id = normalize_user_id(payload.get("user_id"))
+    device_id = normalize_device_id(payload.get("device_id"))
+    if not department_id or not user_id or not device_id:
+        return jsonify({"status": "failed", "reason": "invalid_request"}), 400
+    if not is_allowed_in_department_db(user_id, department_id):
+        return jsonify({"status": "failed", "reason": "id_not_allowed"}), 403
+    ok, lock_status = check_or_create_hwid_lock(user_id, device_id)
+    if not ok:
+        return jsonify({"status": "failed", "reason": "hwid_mismatch"}), 403
+    return jsonify({"status": "success", "lock": lock_status, "user_id": user_id, "department_id": department_id})
+
+@app.route("/api/ids/list", methods=["GET", "OPTIONS"])
+def api_ids_list():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    department_id = normalize_department_id(request.args.get("department_id"))
+    admin_user_id = normalize_user_id(request.args.get("admin_user_id"))
+    admin_device_id = normalize_device_id(request.args.get("admin_device_id"))
+    if not department_id or not admin_user_id or not admin_device_id:
+        return jsonify({"status": "failed", "reason": "invalid_request"}), 400
+    ok, reason = require_sector_admin(admin_user_id, admin_device_id)
+    if not ok:
+        return jsonify({"status": "failed", "reason": reason}), 403
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT user_id, user_name FROM allowed_department_ids WHERE department_id = ? ORDER BY user_id ASC",
+        (department_id,),
+    )
+    rows = cursor.fetchall()
+    items = [{"user_id": row["user_id"], "user_name": row["user_name"]} for row in rows]
+    ids = [row["user_id"] for row in rows]
+    return jsonify({"status": "success", "department_id": department_id, "ids": ids, "items": items})
+
+@app.route("/api/ids/add", methods=["POST", "OPTIONS"])
+def api_ids_add():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    department_id = normalize_department_id(payload.get("department_id"))
+    user_id = normalize_user_id(payload.get("user_id"))
+    user_name = normalize_user_name(payload.get("user_name"))
+    admin_user_id = normalize_user_id(payload.get("admin_user_id"))
+    admin_device_id = normalize_device_id(payload.get("admin_device_id"))
+    if not department_id or not user_id or not admin_user_id or not admin_device_id:
+        return jsonify({"status": "failed", "reason": "invalid_request"}), 400
+    ok, reason = require_sector_admin(admin_user_id, admin_device_id)
+    if not ok:
+        return jsonify({"status": "failed", "reason": reason}), 403
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("""
+        INSERT INTO allowed_department_ids (department_id, user_id, user_name)
+        VALUES (?, ?, ?)
+        ON CONFLICT(department_id, user_id) DO UPDATE SET
+            user_name = excluded.user_name
+    """, (department_id, user_id, user_name))
+    db.commit()
+    return jsonify({"status": "success", "department_id": department_id, "user_id": user_id, "user_name": user_name})
+
+@app.route("/api/ids/remove", methods=["POST", "OPTIONS"])
+def api_ids_remove():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    department_id = normalize_department_id(payload.get("department_id"))
+    user_id = normalize_user_id(payload.get("user_id"))
+    admin_user_id = normalize_user_id(payload.get("admin_user_id"))
+    admin_device_id = normalize_device_id(payload.get("admin_device_id"))
+    if not department_id or not user_id or not admin_user_id or not admin_device_id:
+        return jsonify({"status": "failed", "reason": "invalid_request"}), 400
+    ok, reason = require_sector_admin(admin_user_id, admin_device_id)
+    if not ok:
+        return jsonify({"status": "failed", "reason": reason}), 403
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        "DELETE FROM allowed_department_ids WHERE department_id = ? AND user_id = ?",
+        (department_id, user_id),
+    )
+    db.commit()
+    return jsonify({"status": "success", "department_id": department_id, "user_id": user_id})
+
+@app.route("/api/hwid/reset", methods=["POST", "OPTIONS"])
+def api_hwid_reset():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    payload = request.get_json(silent=True) or {}
+    user_id = normalize_user_id(payload.get("user_id"))
+    admin_user_id = normalize_user_id(payload.get("admin_user_id"))
+    admin_device_id = normalize_device_id(payload.get("admin_device_id"))
+    if not user_id or not admin_user_id or not admin_device_id:
+        return jsonify({"status": "failed", "reason": "invalid_request"}), 400
+    ok, reason = require_sector_admin(admin_user_id, admin_device_id)
+    if not ok:
+        return jsonify({"status": "failed", "reason": reason}), 403
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM hwid_locks WHERE user_id = ?", (user_id,))
+    db.commit()
+    return jsonify({"status": "success", "user_id": user_id, "removed": cursor.rowcount})
 
 @app.route("/check_status")
 def check_status():
