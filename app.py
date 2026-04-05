@@ -360,7 +360,7 @@ def api_ids_add():
     user_name = normalize_user_name(payload.get("user_name"))
     admin_user_id = normalize_user_id(payload.get("admin_user_id"))
     admin_device_id = normalize_device_id(payload.get("admin_device_id"))
-    if not department_id or not user_id or not admin_user_id or not admin_device_id:
+    if not department_id or not user_id or not user_name or not admin_user_id or not admin_device_id:
         return jsonify({"status": "failed", "reason": "invalid_request"}), 400
     ok, reason = require_sector_admin(admin_user_id, admin_device_id)
     if not ok:
